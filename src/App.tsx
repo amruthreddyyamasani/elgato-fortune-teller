@@ -26,10 +26,10 @@ export const App = () => {
     setScene('greeting');
   };
 
-  const startJumpscare = (fileName: string) => {
+  const startJumpscare = (fileName: string, repeatForMs = 0) => {
     // Keep this call in the door's click handler so fullscreen and media playback
     // are both initiated directly from the user's gesture.
-    jumpscareRef.current?.start(assetUrl(fileName));
+    jumpscareRef.current?.start(assetUrl(fileName), repeatForMs);
   };
 
   return (
@@ -169,7 +169,7 @@ export const App = () => {
                   doorNumber={2}
                   title="The Soft Sage"
                   subtitle="Mysteries of tomorrow"
-                  onClick={() => startJumpscare('jumpscare-1.mp4')}
+                  onClick={() => startJumpscare('door-2.mp4', 5000)}
                 />
                 <DoorCard
                   doorNumber={3}

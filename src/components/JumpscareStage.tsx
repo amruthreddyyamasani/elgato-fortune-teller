@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useRef,
@@ -9,7 +10,7 @@ import {
 type StagePhase = 'idle' | 'playing' | 'freeze' | 'freeze-video' | 'black' | 'error';
 
 export interface JumpscareStageHandle {
-  start: (videoSrc: string) => void;
+  start: (videoSrc: string, repeatForMs?: number) => void;
 }
 
 interface JumpscareStageProps {
@@ -21,12 +22,102 @@ export const JumpscareStage = forwardRef<JumpscareStageHandle, JumpscareStagePro
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const sourceRef = useRef<string | null>(null);
+    const repeatForMsRef = useRef(0);
+    const loopTimerRef = useRef<number | null>(null);
     const [phase, setPhase] = useState<StagePhase>('idle');
     const [showReturnPrompt, setShowReturnPrompt] = useState(false);
 
+    const clearLoopTimer = useCallback(() => {
+      if (loopTimerRef.current !== null) {
+        window.clearTimeout(loopTimerRef.current);
+        loopTimerRef.current = null;
+      }
+    }, []);
+
+    const showPlaybackError = useCallback(() => {
+      clearLoopTimer();
+      const video = videoRef.current;
+      if (video) {
+        video.loop = false;
+        video.pause();
+      }
+      setPhase('error');
+    }, [clearLoopTimer]);
+
+    const freezeFinalFrame = useCallback(() => {
+      clearLoopTimer();
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (video) {
+        video.loop = false;
+        video.pause();
+      }
+
+      let captured = false;
+      if (video && canvas && video.videoWidth > 0 && video.videoHeight > 0) {
+        try {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const context = canvas.getContext('2d');
+          if (context) {
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            captured = true;
+          }
+        } catch {
+          // Keep the browser's naturally held paused frame visible instead.
+        }
+      }
+      setPhase(captured ? 'freeze' : 'freeze-video');
+    }, [clearLoopTimer]);
+
+    const beginEndLoop = useCallback(() => {
+      const video = videoRef.current;
+      const repeatForMs = repeatForMsRef.current;
+      if (!video) {
+        showPlaybackError();
+        return;
+      }
+      if (repeatForMs <= 0) {
+        freezeFinalFrame();
+        return;
+      }
+
+      clearLoopTimer();
+      try {
+        video.loop = false;
+        video.currentTime = 0;
+        video.loop = true;
+      } catch {
+        showPlaybackError();
+        return;
+      }
+
+      // Door 2 starts this short repeat window only after the first full play.
+      // Its timer begins once the browser confirms that replay has started.
+      void video.play().then(() => {
+        loopTimerRef.current = window.setTimeout(() => {
+          loopTimerRef.current = null;
+          const activeVideo = videoRef.current;
+          if (!activeVideo) {
+            showPlaybackError();
+            return;
+          }
+          activeVideo.loop = false;
+          activeVideo.pause();
+          freezeFinalFrame();
+        }, repeatForMs);
+      }).catch(showPlaybackError);
+    }, [clearLoopTimer, freezeFinalFrame, showPlaybackError]);
+
+    useEffect(() => () => clearLoopTimer(), [clearLoopTimer]);
+
     useImperativeHandle(ref, () => ({
-      start: (videoSrc: string) => {
+      start: (videoSrc: string, repeatForMs = 0) => {
         sourceRef.current = videoSrc;
+        repeatForMsRef.current = Number.isFinite(repeatForMs)
+          ? Math.max(0, repeatForMs)
+          : 0;
+        clearLoopTimer();
         setShowReturnPrompt(false);
 
         // Both privileged requests are made synchronously from the door click.
@@ -39,22 +130,21 @@ export const JumpscareStage = forwardRef<JumpscareStageHandle, JumpscareStagePro
 
         const video = videoRef.current;
         if (!video) {
-          setPhase('error');
+          showPlaybackError();
           return;
         }
 
         video.pause();
+        video.loop = false;
         video.removeAttribute('src');
         video.src = videoSrc;
         video.load();
         setPhase('playing');
 
         // Do not mute as a fallback. The supplied audio track is played intact.
-        void video.play().catch(() => {
-          setPhase('error');
-        });
+        void video.play().catch(showPlaybackError);
       },
-    }), []);
+    }), [clearLoopTimer, showPlaybackError]);
 
     useEffect(() => {
       if (phase !== 'freeze' && phase !== 'freeze-video') return;
@@ -68,26 +158,6 @@ export const JumpscareStage = forwardRef<JumpscareStageHandle, JumpscareStagePro
       return () => window.clearTimeout(timer);
     }, [phase]);
 
-    const freezeFinalFrame = () => {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      let captured = false;
-      if (video && canvas && video.videoWidth > 0 && video.videoHeight > 0) {
-        try {
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-          const context = canvas.getContext('2d');
-          if (context) {
-            context.drawImage(video, 0, 0, canvas.width, canvas.height);
-            captured = true;
-          }
-        } catch {
-          // Keep the browser's naturally held end frame visible instead.
-        }
-      }
-      setPhase(captured ? 'freeze' : 'freeze-video');
-    };
-
     const tryPlaybackAgain = () => {
       const source = sourceRef.current;
       const video = videoRef.current;
@@ -97,21 +167,26 @@ export const JumpscareStage = forwardRef<JumpscareStageHandle, JumpscareStagePro
       if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
         void document.documentElement.requestFullscreen().catch(() => undefined);
       }
+      clearLoopTimer();
       video.pause();
+      video.loop = false;
       video.src = source;
       video.load();
       setPhase('playing');
-      void video.play().catch(() => setPhase('error'));
+      void video.play().catch(showPlaybackError);
     };
 
     const awaken = () => {
       const video = videoRef.current;
+      clearLoopTimer();
       if (video) {
+        video.loop = false;
         video.pause();
         video.removeAttribute('src');
         video.load();
       }
       sourceRef.current = null;
+      repeatForMsRef.current = 0;
       setShowReturnPrompt(false);
       setPhase('idle');
       if (document.fullscreenElement && document.exitFullscreen) {
@@ -126,7 +201,7 @@ export const JumpscareStage = forwardRef<JumpscareStageHandle, JumpscareStagePro
       <section
         className={`scare-stage ${phase === 'idle' ? 'is-idle' : `is-${phase}`}`}
         aria-hidden={phase === 'idle'}
-        aria-label="Full-screen horror video"
+        aria-label="Full-screen video stage"
       >
         <video
           ref={videoRef}
@@ -134,9 +209,9 @@ export const JumpscareStage = forwardRef<JumpscareStageHandle, JumpscareStagePro
           playsInline
           preload="none"
           controls={false}
-          onEnded={freezeFinalFrame}
+          onEnded={beginEndLoop}
           onError={() => {
-            if (phase === 'playing') setPhase('error');
+            if (phase === 'playing') showPlaybackError();
           }}
           style={{ display: keepVideoFrame ? 'block' : 'none' }}
         />
